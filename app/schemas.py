@@ -323,6 +323,85 @@ class StationSummaryResponse(StrictModel):
     stations: list[StationSummaryItem]
 
 
+# --------------------------------------------------------------------------
+# 复核唯一性核查（当前非锁定配对是否唯一选择；只读）
+# --------------------------------------------------------------------------
+class PairReviewChanges(StrictModel):
+    """替代方案相对当前结果的增删（按记录对升序）。"""
+
+    added: list[PairOut] = Field(
+        ..., description="替代方案中新出现的配对（以替代方案内容为准）"
+    )
+    removed: list[PairOut] = Field(
+        ..., description="当前结果中被替换掉的配对（以当前内容为准）"
+    )
+
+
+class PairReviewAlternative(StrictModel):
+    """不含被核查配对的一份完整合法替代方案（字典序最小者）。"""
+
+    pairs: list[PairOut] = Field(
+        ..., description="替代方案的完整配对清单（含全部锁定对，按记录对升序）"
+    )
+    unpaired: list[str] = Field(
+        ..., description="替代方案的未配对记录（活跃日志口径）"
+    )
+    total_time_diff_seconds: float = Field(
+        ..., description="替代方案总时差（与当前方案的最小总时差相同）"
+    )
+    changes: PairReviewChanges = Field(
+        ..., description="相对当前互证结果的增删"
+    )
+
+
+class PairCheckItem(StrictModel):
+    """当前互证结果中一条配对的唯一性核查结论。"""
+
+    record_a: str
+    record_b: str
+    time_diff_seconds: float
+    locked: bool = Field(
+        ..., description="是否人工锁定对（锁定对强制保留，不可替换）"
+    )
+    in_all_schemes: bool = Field(
+        ...,
+        description=(
+            "是否出现在所有“配对数全场最大、该数量下总时差最小”的合法"
+            "完整方案中；锁定对恒为 true"
+        ),
+    )
+    replaceable: bool = Field(
+        ...,
+        description="是否可替换（非锁定且不在所有方案中）；与 "
+        "in_all_schemes 对非锁定对互为反面",
+    )
+    alternative: PairReviewAlternative | None = Field(
+        None,
+        description=(
+            "可替换时为不含该对的字典序最小完整替代方案；唯一选择或"
+            "锁定对时为 null"
+        ),
+    )
+
+
+class PairReviewResponse(StrictModel):
+    """当前互证结果的配对唯一性核查（当前版本；只读）。"""
+
+    drill_id: str
+    version: int
+    sealed: bool
+    allowed_time_diff_seconds: float
+    optimal_pair_count: int = Field(
+        ..., description="合法完整方案比较范围内的全场最大配对数（含锁定对）"
+    )
+    minimum_total_time_diff_seconds: float = Field(
+        ..., description="该最大配对数下的最小总时差（秒）"
+    )
+    pair_checks: list[PairCheckItem] = Field(
+        ..., description="逐条当前配对的核查结论（按记录对升序；空场为空清单）"
+    )
+
+
 class LockRequest(StrictModel):
     """锁定/解除锁定请求体：一对记录号（顺序任意，服务端内部升序）。"""
 

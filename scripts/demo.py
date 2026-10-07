@@ -177,6 +177,37 @@ def main(base_url: str) -> None:
         "GET", f"{base_url}/drills/{drill}/station-summary"
     ))
 
+    # --- 配对唯一性核查：当前非锁定配对是否唯一选择（只读，封存后仍可查） ---
+    # 以同一版本日志/锁定/隔离为准：保留锁定对（不可替换）、排除隔离日志；
+    # 只比较“配对数全场最大、该数量下总时差最小”的合法完整方案；可替换时
+    # 返回一份不含该对的字典序最小完整替代方案及增删；空场返回空清单。
+    show("配对唯一性核查（只读；非锁定对是否在所有最优方案中）", *call(
+        "GET", f"{base_url}/drills/{drill}/pair-review"
+    ))
+
+    # 构造一个存在“等配对数、等总时差”替代方案的演练：2 左 2 右全部同时刻，
+    # (a,c)(b,d) 与 (a,d)(b,c) 总时差都为 0，当前两对都应可替换。
+    alt_drill = drill + "-ALT"
+    call("POST", f"{base_url}/drills",
+         {"drill_id": alt_drill, "allowed_time_diff_seconds": 10})
+    alt_logs = [
+        {"record_no": "a", "station": "BH1AAA", "counterpart": "BH2BBB",
+         "time": "2026-10-04T00:00:00+00:00", "band": "40m", "mode": "SSB"},
+        {"record_no": "b", "station": "BH1AAA", "counterpart": "BH2BBB",
+         "time": "2026-10-04T00:00:00+00:00", "band": "40m", "mode": "SSB"},
+        {"record_no": "c", "station": "BH2BBB", "counterpart": "BH1AAA",
+         "time": "2026-10-04T00:00:00+00:00", "band": "40m", "mode": "SSB"},
+        {"record_no": "d", "station": "BH2BBB", "counterpart": "BH1AAA",
+         "time": "2026-10-04T00:00:00+00:00", "band": "40m", "mode": "SSB"},
+    ]
+    call("POST", f"{base_url}/drills/{alt_drill}/logs", {"logs": alt_logs})
+    show("等时差替代场景的配对唯一性核查（两对均应可替换）", *call(
+        "GET", f"{base_url}/drills/{alt_drill}/pair-review"
+    ))
+    show("未知演练的配对核查（应 404 drill_not_found）", *call(
+        "GET", f"{base_url}/drills/NOPE/pair-review"
+    ))
+
     # --- 版本快照：复核员按版本回看、比较两版差异（只读） ---
     # 列出已留存版本号（创建即有 0；每次真正推进版本同事务留存一版）
     show("已留存快照版本号", *call(
@@ -324,6 +355,11 @@ def main(base_url: str) -> None:
     # 封存后仍可按台站汇总（只读；sealed 为 true）
     show("封存后仍可查询台站汇总", *call(
         "GET", f"{base_url}/drills/{drill}/station-summary"
+    ))
+
+    # 封存后仍可进行配对唯一性核查（只读；版本、sealed 与最终现态一致）
+    show("封存后仍可查询配对唯一性核查", *call(
+        "GET", f"{base_url}/drills/{drill}/pair-review"
     ))
 
     # 未知演练明确报错：404 drill_not_found

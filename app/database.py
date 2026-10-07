@@ -19,7 +19,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from . import config
 from .matching import (
@@ -28,9 +28,11 @@ from .matching import (
     MatchResult,
     Pair,
     Record,
+    ReviewResult,
     diagnose_gaps,
     match_records,
     pair_eligibility,
+    review_free_pairs,
 )
 
 MICROS_PER_SECOND = 1_000_000
@@ -1849,6 +1851,154 @@ def get_result(drill_id: str) -> dict:
             "total_time_diff_seconds": row["total_time_diff_seconds"],
             "recomputed_at": row["recomputed_at"],
         }
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# 复核唯一性核查（当前结果中哪些非锁定配对并非唯一选择）：只读
+#
+# 以同一版本的日志、人工锁定与隔离状态为准：被隔离日志不参与核查（候选
+# 池即当前重算所用的未隔离日志），全部锁定对强制保留且不可替换；只在
+# “配对数全场最大、该数量下总时差最小”的合法完整方案之间比较，判定
+# 当前每条非锁定配对是否出现在所有这类方案中；可替换时给一份不含该对
+# 的完整替代方案（按记录号字典序规则取最小）及相对当前结果的增删。
+# 核查不改变日志、结果、版本与快照；封存后仍可查；未知演练 404。
+# --------------------------------------------------------------------------
+def _review_result_payload(
+    review: ReviewResult,
+    locked_pairs: list[Pair],
+    active_records: Sequence[Record],
+    locked_total_micros: int,
+) -> dict:
+    """把算法层核查结果组装为响应体（含替代方案相对当前结果的增删）。
+
+    算法层的 ``alternative`` 只含自由匹配池部分；这里把锁定对补回，
+    形成“保留全部锁定对”的完整替代方案（未配对按全场活跃日志计算）。
+    """
+    locked_pair_payload = [
+        {
+            "record_a": p.record_a,
+            "record_b": p.record_b,
+            "time_diff_seconds": p.time_diff_seconds,
+        }
+        for p in sorted(locked_pairs, key=lambda x: x.as_tuple())
+    ]
+
+    checks: list[dict] = []
+    for item in review.checks:
+        key = item.pair.as_tuple()
+        entry = {
+            "record_a": key[0],
+            "record_b": key[1],
+            "time_diff_seconds": item.pair.time_diff_seconds,
+            "locked": item.locked,
+            "in_all_schemes": item.in_all_schemes,
+            "replaceable": not item.locked and not item.in_all_schemes,
+            "alternative": None,
+        }
+        if item.alternative is not None:
+            free_pair_payload = [
+                {
+                    "record_a": p.record_a,
+                    "record_b": p.record_b,
+                    "time_diff_seconds": p.time_diff_seconds,
+                }
+                for p in item.alternative.pairs
+            ]
+            alt_pairs = sorted(
+                locked_pair_payload + free_pair_payload,
+                key=lambda p: (p["record_a"], p["record_b"]),
+            )
+            alt_matched = {x for p in alt_pairs for x in (p["record_a"], p["record_b"])}
+            alt_unpaired = [
+                r.record_no
+                for r in active_records
+                if r.record_no not in alt_matched
+            ]
+            alt_total = (
+                locked_total_micros / MICROS_PER_SECOND
+                + item.alternative.total_time_diff_seconds
+            )
+            # 当前结果的完整配对清单（用于逐对生成增删）。
+            current_pairs = [
+                {
+                    "record_a": c.pair.record_a,
+                    "record_b": c.pair.record_b,
+                    "time_diff_seconds": c.pair.time_diff_seconds,
+                }
+                for c in review.checks
+            ]
+            diff = _pairs_diff(current_pairs, alt_pairs)
+            entry["alternative"] = {
+                "pairs": alt_pairs,
+                "unpaired": alt_unpaired,
+                "total_time_diff_seconds": alt_total,
+                "changes": {
+                    "added": diff["added"],
+                    "removed": diff["removed"],
+                },
+            }
+        checks.append(entry)
+    return {
+        "optimal_pair_count": review.max_pair_count,
+        "minimum_total_time_diff_seconds": (
+            review.min_total_time_diff_seconds
+        ),
+        "pair_checks": checks,
+    }
+
+
+def get_pair_review(drill_id: str) -> dict:
+    """核查当前互证结果中每条非锁定配对的唯一性（只读）。
+
+    核查以当前版本日志、锁定清单与隔离状态为准，在 WAL 一致性读快照内
+    完成；不改变任何状态，封存后仍可查询；未知演练抛
+    ``drill_not_found``。空场（无任何非锁定配对）时 ``pair_checks``
+    为空清单。
+    """
+    conn = connect()
+    try:
+        with _read_tx(conn):
+            drill = _get_drill_row(conn, drill_id)
+            records = _load_records(conn, drill_id)
+            quarantined = _load_quarantine_nos(conn, drill_id)
+            # 与当前重算同一口径：排除隔离日志，保留全部锁定对。
+            active = [r for r in records if r.record_no not in quarantined]
+            lock_keys = _load_lock_keys(conn, drill_id)
+            try:
+                review = review_free_pairs(
+                    active, drill["allowed_diff_secs"],
+                    locked_keys=lock_keys,
+                )
+            except InvalidLockError as exc:
+                # 理论上不会发生：当前结果可算出即锁定仍合法；防御性翻译。
+                raise LockInvalidatedError(str(exc))
+            rmap = _record_map(active)
+            locked_pairs: list[Pair] = []
+            locked_total_micros = 0
+            for a, b in lock_keys:
+                weight = abs(rmap[a].ts_micros - rmap[b].ts_micros)
+                locked_total_micros += weight
+                locked_pairs.append(
+                    Pair(
+                        record_a=a,
+                        record_b=b,
+                        time_diff_seconds=weight / MICROS_PER_SECOND,
+                    )
+                )
+        payload = {
+            "drill_id": drill_id,
+            "version": drill["version"],
+            "sealed": bool(drill["sealed"]),
+            "allowed_time_diff_seconds": drill["allowed_diff_secs"],
+        }
+        payload.update(
+            _review_result_payload(
+                review, locked_pairs, active, locked_total_micros
+            )
+        )
+        return payload
     finally:
         conn.close()
 

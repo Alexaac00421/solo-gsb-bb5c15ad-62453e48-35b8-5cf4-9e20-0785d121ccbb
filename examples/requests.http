@@ -151,6 +151,15 @@ GET {{host}}/drills/{{drill}}/gap-diagnostics
 ### 仅在对方呼号中出现而未上报日志的台站不产生汇总项；空演练 stations 为空。
 GET {{host}}/drills/{{drill}}/station-summary
 
+### 配对唯一性核查（只读；以同一版本日志/锁定/隔离为准，保留锁定、排除隔离）
+### 逐条当前配对返回：locked（锁定对，不可替换）、in_all_schemes（是否在所有
+###   “配对数全场最大、该数量下总时差最小”的合法完整方案中）、replaceable；
+###   可替换时 alternative 给出一份不含该对的完整替代配对（保留锁定对）及
+###   相对当前结果的 changes.added/removed，多个替代按记录号字典序取最小。
+### 空场 pair_checks 为空；封存后仍可查；未知演练 404 drill_not_found。
+### 原 GET /result 接口及其三级优先级选定规则保持不变。
+GET {{host}}/drills/{{drill}}/pair-review
+
 ### 锁定一对互证候选（记录号顺序任意，服务端内部升序）
 ### 仅接受：现存、相互指认、波段/模式相同、时差不超允许值，
 ### 且两条记录均未被其他锁定占用。锁定强制入选结果（即使拉低全场配对数）。

@@ -22,6 +22,7 @@ from .schemas import (
     LockListResponse,
     LockRequest,
     LogEntry,
+    PairReviewResponse,
     QuarantineActionResponse,
     QuarantineListResponse,
     QuarantineRequest,
@@ -44,12 +45,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="应急无线电演练通联日志互证服务",
-    version="1.8.0",
+    version="1.9.0",
     description=(
         "记录各台站通联日志，按相互指认、波段/模式一致、时差不超限的"
         "规则完成全场最优配对（最大配对数 → 最小总时差 → 字典序最小），"
         "支持版本化更正、并发原子写入、演练封存、按台站汇总配对覆盖率"
-        "与争议日志隔离，以及复核员锁定/解除与隔离/恢复的批量裁决。"
+        "与争议日志隔离，以及复核员锁定/解除与隔离/恢复的批量裁决；"
+        "另提供配对唯一性核查（pair-review）：判定当前非锁定配对是否"
+        "出现在所有最大配对数、最小总时差的合法完整方案中。"
     ),
     lifespan=lifespan,
 )
@@ -224,6 +227,19 @@ def get_gap_diagnostics(drill_id: str) -> dict:
 )
 def get_station_summary(drill_id: str) -> dict:
     return database.get_station_summary(drill_id)
+
+
+@app.get(
+    "/drills/{drill_id}/pair-review",
+    response_model=PairReviewResponse,
+    tags=["result"],
+    summary=(
+        "复核唯一性核查（只读）：当前非锁定配对是否唯一选择，可替换时"
+        "给字典序最小完整替代方案及增删；封存后仍可查"
+    ),
+)
+def get_pair_review(drill_id: str) -> dict:
+    return database.get_pair_review(drill_id)
 
 
 # --------------------------------------------------------------------------
